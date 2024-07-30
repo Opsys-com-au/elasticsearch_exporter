@@ -100,6 +100,7 @@ var (
 	defaultFilesystemDataLabels     = append(defaultNodeLabels, "mount", "path")
 	defaultFilesystemIODeviceLabels = append(defaultNodeLabels, "device")
 	defaultCacheLabels              = append(defaultNodeLabels, "cache")
+	defaultPipelineLabels           = append(defaultNodeLabels, "pipeline")
 
 	defaultNodeLabelValues = func(cluster string, node NodeStatsNodeResponse) []string {
 		roles := getRoles(node)
@@ -127,6 +128,9 @@ var (
 	}
 	defaultCacheMissLabelValues = func(cluster string, node NodeStatsNodeResponse) []string {
 		return append(defaultNodeLabelValues(cluster, node), "miss")
+	}
+	defaultPipelineLabelValues = func(cluster string, node NodeStatsNodeResponse, pipeline string) []string {
+		return append(defaultNodeLabelValues(cluster, node), pipeline)
 	}
 )
 
@@ -179,6 +183,13 @@ type filesystemIODeviceMetric struct {
 	Labels func(cluster string, node NodeStatsNodeResponse, device string) []string
 }
 
+type pipelinesMetric struct {
+	Type   prometheus.ValueType
+	Desc   *prometheus.Desc
+	Value  func(fsStats NodeStatsIngestPipelinesResponse) float64
+	Labels func(cluster string, node NodeStatsNodeResponse, pipeline string) []string
+}
+
 // Nodes information struct
 type Nodes struct {
 	logger log.Logger
@@ -197,6 +208,7 @@ type Nodes struct {
 	threadPoolMetrics         []*threadPoolMetric
 	filesystemDataMetrics     []*filesystemDataMetric
 	filesystemIODeviceMetrics []*filesystemIODeviceMetric
+	pipelinesMetrics          []*pipelinesMetric
 }
 
 // NewNodes defines Nodes Prometheus metrics
@@ -1830,6 +1842,44 @@ func NewNodes(logger log.Logger, client *http.Client, url *url.URL, all bool, no
 				Labels: defaultFilesystemIODeviceLabelValues,
 			},
 		},
+		pipelinesMetrics: []*pipelinesMetric{
+			{
+				Type: prometheus.GaugeValue,
+				Desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, "pipeline_processsor", "total_processed"),
+					"Total number of documents processed",
+					defaultPipelineLabels, nil,
+				),
+				Value: func(fsPipelineStats NodeStatsIngestPipelinesResponse) float64 {
+					return float64(fsPipelineStats.Count)
+				},
+				Labels: defaultPipelineLabelValues,
+			},
+			{
+				Type: prometheus.GaugeValue,
+				Desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, "pipeline_processsor", "current"),
+					"Total number of documents currently in the queue",
+					defaultPipelineLabels, nil,
+				),
+				Value: func(fsPipelineStats NodeStatsIngestPipelinesResponse) float64 {
+					return float64(fsPipelineStats.Current)
+				},
+				Labels: defaultPipelineLabelValues,
+			},
+			{
+				Type: prometheus.GaugeValue,
+				Desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, "pipeline_processsor", "failed"),
+					"Total number of documents which have failed",
+					defaultPipelineLabels, nil,
+				),
+				Value: func(fsPipelineStats NodeStatsIngestPipelinesResponse) float64 {
+					return float64(fsPipelineStats.Failed)
+				},
+				Labels: defaultPipelineLabelValues,
+			},
+		},
 	}
 }
 
@@ -1848,6 +1898,9 @@ func (c *Nodes) Describe(ch chan<- *prometheus.Desc) {
 		ch <- metric.Desc
 	}
 	for _, metric := range c.filesystemIODeviceMetrics {
+		ch <- metric.Desc
+	}
+	for _, metric := range c.pipelinesMetrics {
 		ch <- metric.Desc
 	}
 	ch <- c.up.Desc()
@@ -2016,5 +2069,16 @@ func (c *Nodes) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 
+		for pipeline, fsPipeline := range node.Ingest.Pipelines {
+			fmt.Println(pipeline, fsPipeline)
+			for _, metric := range c.pipelinesMetrics {
+				ch <- prometheus.MustNewConstMetric(
+					metric.Desc,
+					metric.Type,
+					metric.Value(fsPipeline),
+					metric.Labels(nodeStatsResp.ClusterName, node, pipeline)...,
+				)
+			}
+		}
 	}
 }

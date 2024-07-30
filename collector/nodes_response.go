@@ -31,6 +31,7 @@ type NodeStatsNodeResponse struct {
 	Roles            []string                                     `json:"roles"`
 	Attributes       map[string]string                            `json:"attributes"`
 	Indices          NodeStatsIndicesResponse                     `json:"indices"`
+	Ingest           NodeStatsIngestResonse                       `json:"ingest"`
 	OS               NodeStatsOSResponse                          `json:"os"`
 	Network          NodeStatsNetworkResponse                     `json:"network"`
 	FS               NodeStatsFSResponse                          `json:"fs"`
@@ -41,6 +42,16 @@ type NodeStatsNodeResponse struct {
 	Transport        NodeStatsTransportResponse                   `json:"transport"`
 	Process          NodeStatsProcessResponse                     `json:"process"`
 	IndexingPressure map[string]NodeStatsIndexingPressureResponse `json:"indexing_pressure"`
+}
+
+type NodeStatsIngestResonse struct {
+	Pipelines map[string]NodeStatsIngestPipelinesResponse `json:"pipelines"`
+}
+
+type NodeStatsIngestPipelinesResponse struct {
+	Count   int64 `json:"count"`
+	Current int64 `json:"current"`
+	Failed  int64 `json:"failed"`
 }
 
 // NodeStatsBreakersResponse is a representation of a statistics about the field data circuit breaker
