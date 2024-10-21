@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strings"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -50,6 +51,11 @@ type ClusterHealth struct {
 	client *http.Client
 	url    *url.URL
 
+	// Prometheus descriptors for Kibana rule execution statuses
+	kibanaSucceededMetric      *prometheus.Desc
+	kibanaPartialFailureMetric *prometheus.Desc
+	kibanaFailureMetric        *prometheus.Desc
+
 	metrics      []*clusterHealthMetric
 	statusMetric *clusterHealthStatusMetric
 }
@@ -62,6 +68,22 @@ func NewClusterHealth(logger log.Logger, client *http.Client, url *url.URL) *Clu
 		logger: logger,
 		client: client,
 		url:    url,
+
+		kibanaSucceededMetric: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "kibana_rule_succeeded_total"),
+			"Total number of Kibana rules that succeeded.",
+			[]string{"cluster"}, nil,
+		),
+		kibanaPartialFailureMetric: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "kibana_rule_partial_failure_total"),
+			"Total number of Kibana rules with partial failures.",
+			[]string{"cluster"}, nil,
+		),
+		kibanaFailureMetric: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "kibana_rule_failed_total"),
+			"Total number of Kibana rules that failed.",
+			[]string{"cluster"}, nil,
+		),
 
 		metrics: []*clusterHealthMetric{
 			{
@@ -276,4 +298,115 @@ func (c *ClusterHealth) Collect(ch chan<- prometheus.Metric) {
 			clusterHealthResp.ClusterName, color,
 		)
 	}
+
+	// Fetch Kibana rule execution statuses
+	succeeded, partialFailures, failures, err := c.fetchKibanaRuleExecutionStatus()
+	if err != nil {
+		level.Warn(c.logger).Log(
+			"msg", "failed to fetch Kibana rule execution statuses",
+			"err", err,
+		)
+		return
+	}
+
+	// Expose Kibana rule metrics as Prometheus metrics
+	ch <- prometheus.MustNewConstMetric(
+		c.kibanaSucceededMetric,
+		prometheus.GaugeValue,
+		float64(succeeded),
+		clusterHealthResp.ClusterName,
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.kibanaPartialFailureMetric,
+		prometheus.GaugeValue,
+		float64(partialFailures),
+		clusterHealthResp.ClusterName,
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.kibanaFailureMetric,
+		prometheus.GaugeValue,
+		float64(failures),
+		clusterHealthResp.ClusterName,
+	)
+
+}
+
+// Query Kibana Logs for Rule Execution Metrics - this must be done as a POST query
+func (c *ClusterHealth) fetchKibanaRuleExecutionStatus() (succeeded, partialFailures, failures int, err error) {
+	var result struct {
+		Aggregations struct {
+			Statuses struct {
+				Buckets []struct {
+					Key      string `json:"key"`
+					DocCount int    `json:"doc_count"`
+				} `json:"buckets"`
+			} `json:"statuses"`
+		} `json:"aggregations"`
+	}
+
+	// Define the Elasticsearch query
+	query := `{
+		"query": {
+			"bool": {
+				"should": [
+					{ "match": { "kibana.alert.rule.execution.status": "succeeded" } },
+					{ "match": { "kibana.alert.rule.execution.status": "partial failure" } },
+					{ "match": { "kibana.alert.rule.execution.status": "failed" } }
+				]
+			}
+		},
+		"aggs": {
+			"statuses": {
+				"terms": {
+					"field": "kibana.alert.rule.execution.status"
+				}
+			}
+		},
+		"size": 0
+	}`
+
+	// Perform the request to Elasticsearch
+	u := *c.url
+	u.Path = path.Join(u.Path, "/.kibana-event-log-*/_search")
+	req, err := http.NewRequest("POST", u.String(), strings.NewReader(query))
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to create request to Elasticsearch: %s", err)
+	}
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := c.client.Do(req)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to fetch Kibana rule execution status: %s", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return 0, 0, 0, fmt.Errorf("Elasticsearch API request failed with code %d", res.StatusCode)
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	// Parse the JSON response
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, 0, 0, err
+	}
+
+	// Loop through buckets to count the different statuses
+	for _, bucket := range result.Aggregations.Statuses.Buckets {
+		switch bucket.Key {
+		case "succeeded":
+			succeeded = bucket.DocCount
+		case "partial failure":
+			partialFailures = bucket.DocCount
+		case "failed":
+			failures = bucket.DocCount
+		}
+	}
+
+	return succeeded, partialFailures, failures, nil
 }
